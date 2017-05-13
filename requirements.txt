@@ -1,0 +1,13 @@
+click==6.7
+gensim==0.13.1
+joblib==0.10.3
+lmdb==0.92
+marisa-trie==0.7.2
+mwparserfromhell==0.4.4
+numpy==1.11.3
+rdflib==4.2.2
+repoze.lru==0.6
+requests==2.13.0
+scikit-learn==0.18.1
+scipy==0.18.1
+torch==0.1.11.post5

@@ -1,0 +1,3 @@
+[submodule "figment"]
+	path = figment
+	url = https://github.com/yyaghoobzadeh/figment.git
