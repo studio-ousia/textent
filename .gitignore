@@ -1,4 +1,6 @@
 junk/
+notebooks/
+paper/
 *.sublime-*
 dataset/
 sftp-config*.json
