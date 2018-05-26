@@ -89,11 +89,11 @@ def train(description_db, entity_db, word_vocab, entity_vocab, target_entity_voc
     for n_epoch in range(1, epoch + 1):
         logger.info('Epoch: %d', n_epoch)
 
-        if n_epoch % 5 == 0:
-            entity_typing.evaluate(
-                model._target_entity_embedding.weight.data.cpu().float().numpy(),
-                model._target_entity_vocab, entity_db
-            )
+        # if n_epoch % 5 == 0:
+        #     entity_typing.evaluate(
+        #         model._target_entity_embedding.weight.data.cpu().float().numpy(),
+        #         model._target_entity_vocab, entity_db
+        #     )
 
         for (batch_idx, (args, target)) in enumerate(generate_data(
             description_db, word_vocab, entity_vocab, target_entity_vocab, entity_negatives,
