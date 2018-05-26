@@ -102,23 +102,18 @@ def load_entity_vector(word_file, entity_file, out_file):
     embedding.save(out_file)
 
 
-@cli.group(name='word2vec')
-def word2vec_group():
-    pass
-
-
-@word2vec_group.command()
+@cli.command()
 @click.argument('dump_file', type=click.Path(exists=True))
 @click.argument('entity_db_file', type=click.Path(exists=True))
 @click.argument('out_file', type=click.Path())
 @click.option('--pool-size', default=20)
 @click.option('--chunk-size', default=30)
-def generate_corpus(dump_file, entity_db_file, out_file, **kwargs):
+def generate_word2vec_corpus(dump_file, entity_db_file, out_file, **kwargs):
     entity_db = EntityDB.load(entity_db_file)
     word2vec.generate_corpus(dump_file, entity_db, out_file, **kwargs)
 
 
-@word2vec_group.command(name='train')
+@cli.command(name='train')
 @click.argument('corpus_file', type=click.Path(exists=True))
 @click.argument('out_file', type=click.Path())
 @click.option('--mode', type=click.Choice(['sg', 'cbow']), default='sg')
