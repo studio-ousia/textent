@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import click
 import logging
 import os
 import random
@@ -9,15 +10,14 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from collections import defaultdict
-from joblib import Memory
 from marisa_trie import Trie
+from sklearn.metrics import f1_score
 from tempfile import NamedTemporaryFile
 from torch.autograd import Variable
 
 from utils.vocab import EntityVocab
 
 logger = logging.getLogger(__name__)
-memory = Memory('.')
 
 
 class EntityTypeClassifier(nn.Module):
@@ -27,24 +27,22 @@ class EntityTypeClassifier(nn.Module):
         self._num_classes = num_classes
 
         self._entity_embedding = nn.Embedding(entity_embedding.shape[0], entity_embedding.shape[1])
-        self._entity_embedding.weight = nn.Parameter(torch.FloatTensor(entity_embedding).half().cuda())
+        self._entity_embedding.weight = nn.Parameter(torch.FloatTensor(entity_embedding).cuda())
         self._entity_embedding.weight.requires_grad = False
 
         self._hidden_layer = nn.Linear(entity_embedding.shape[1], hidden_units, bias=False)
         self._output_layer = nn.Linear(hidden_units, num_classes, bias=False)
 
     def forward(self, entity_indices):
-        entity_emb = self._entity_embedding(entity_indices).float()
+        entity_emb = self._entity_embedding(entity_indices)
 
-        hidden_vector = self._hidden_layer(entity_emb)
-        hidden_vector = F.tanh(hidden_vector)
+        hidden_vector = F.tanh(self._hidden_layer(entity_emb))
 
         return F.sigmoid(self._output_layer(hidden_vector))
 
 
-def evaluate(entity_embedding, entity_vocab, entity_db, dataset_dir='.', dev_probs_file=None,
-             test_probs_file=None, batch_size=32, epoch=100, patience=5, hidden_units=200,
-             exclude_oov=False, seed=0):
+def evaluate(entity_embedding, entity_vocab, entity_db, dataset_dir, batch_size, epoch, patience,
+             hidden_units, exclude_oov, temp_dir, seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -52,12 +50,13 @@ def evaluate(entity_embedding, entity_vocab, entity_db, dataset_dir='.', dev_pro
 
     dataset_obj = _read_dataset(dataset_dir)
 
-    target_entities = [t for k in dataset_obj.keys() for (_, t, _, _) in dataset_obj[k]
-                       if t in entity_vocab]
+    target_entities = [title for fold in dataset_obj.keys() for (_, title, _) in dataset_obj[fold]
+                       if title in entity_vocab]
     target_entity_vocab = EntityVocab(Trie(target_entities), start_index=1)
 
-    with open(os.path.join(dataset_dir, 'types')) as types_file:
-        target_labels = [l.decode('utf-8').split('\t')[0][1:] for l in types_file]
+    with open(os.path.join(dataset_dir, 'types.txt')) as types_file:
+        target_labels = [l.rstrip().decode('utf-8') for l in types_file]
+
     label_index = {l: n for (n, l) in enumerate(target_labels)}
 
     target_emb = np.empty((len(target_entity_vocab), entity_embedding.shape[1]))
@@ -65,8 +64,6 @@ def evaluate(entity_embedding, entity_vocab, entity_db, dataset_dir='.', dev_pro
 
     for title in target_entity_vocab:
         target_emb[target_entity_vocab.get_index(title)] = entity_embedding[entity_vocab.get_index(title)]
-
-    del entity_embedding
 
     type_classifier = EntityTypeClassifier(target_emb, len(target_labels), hidden_units)
     type_classifier = type_classifier.cuda()
@@ -76,11 +73,11 @@ def evaluate(entity_embedding, entity_vocab, entity_db, dataset_dir='.', dev_pro
     parameters = [p for p in type_classifier.parameters() if p.requires_grad]
     optimizer_ins = optim.Adam(parameters)
 
-    def generate_batch(fold):
+    def generate_batches(fold):
         index_batch = []
         target_batch = []
 
-        for (n, (_, title, labels, count)) in enumerate(dataset_obj[fold]):
+        for (n, (_, title, labels)) in enumerate(dataset_obj[fold]):
             title = entity_db.resolve_redirect(title)
             if title is None or title not in target_entity_vocab:
                 if exclude_oov:
@@ -100,12 +97,12 @@ def evaluate(entity_embedding, entity_vocab, entity_db, dataset_dir='.', dev_pro
                 index_batch = []
                 target_batch = []
 
-    p1_scores = [0.0]
-    best_dev_probs = None
+    dev_p1_scores = [0.0]
+    best_dev_data = None
 
-    with NamedTemporaryFile(dir='/dev/shm') as f:
+    with NamedTemporaryFile(dir=temp_dir) as f:
         for n_epoch in range(epoch):
-            for (n, (arg, target)) in enumerate(generate_batch('train')):
+            for (n, (arg, target)) in enumerate(generate_batches('train')):
                 arg = Variable(torch.LongTensor(arg)).cuda()
                 target = Variable(torch.FloatTensor(target)).cuda()
 
@@ -120,10 +117,12 @@ def evaluate(entity_embedding, entity_vocab, entity_db, dataset_dir='.', dev_pro
             correct = 0
             total = 0
             dev_probs = []
-            for (arg, target) in generate_batch('dev'):
+            dev_targets = []
+            for (arg, target) in generate_batches('dev'):
                 arg = Variable(torch.LongTensor(arg)).cuda()
                 output = type_classifier(arg).cpu().data.numpy()
                 dev_probs.append(output)
+                dev_targets.append(target)
 
                 for (n, ind) in enumerate(np.argmax(output, axis=1)):
                     total += 1
@@ -131,36 +130,35 @@ def evaluate(entity_embedding, entity_vocab, entity_db, dataset_dir='.', dev_pro
                         correct += 1
 
             dev_probs = np.vstack(dev_probs)
+            dev_targets = np.vstack(dev_targets)
 
             type_classifier.train()
 
             p1_score = float(correct) / total
-            logger.debug('P@1 (dev): %.3f (%d/%d, Epoch: %d)', p1_score, correct, total, n_epoch)
+            logger.info('P@1 (dev): %.3f (%d/%d, Epoch: %d)', p1_score, correct, total, n_epoch)
 
-            if p1_score > max(p1_scores):
+            if p1_score > max(dev_p1_scores):
                 state_dict = type_classifier.state_dict()
                 torch.save(state_dict, f.name)
-                best_dev_probs = dev_probs
+                best_dev_data = (dev_probs, dev_targets)
 
-            p1_scores.append(p1_score)
+            dev_p1_scores.append(p1_score)
 
             if patience is not None:
-                if len(p1_scores) - p1_scores.index(max(p1_scores)) > patience:
+                if len(dev_p1_scores) - dev_p1_scores.index(max(dev_p1_scores)) > patience:
                     break
 
         state_dict = torch.load(f.name)
 
-    if dev_probs_file:
-        for ((fb_id, _, _, _), probs) in zip(dataset_obj['dev'], best_dev_probs):
-            probs_str = ' '.join([str(p) for p in probs])
-            dev_probs_file.write('%s\t%s\n' % (fb_id.encode('utf-8'), probs_str))
+    thresholds = np.array([_compute_bep(best_dev_data[0][:, n], best_dev_data[1][:, n])[1]
+                          for n in range(len(target_labels))])
 
     type_classifier.load_state_dict(state_dict)
     type_classifier.eval()
 
     output_arr = []
     target_arr = []
-    for (arg, target) in generate_batch('test'):
+    for (arg, target) in generate_batches('test'):
         arg = Variable(torch.LongTensor(arg)).cuda()
         output = type_classifier(arg).cpu().data.numpy()
         output_arr.append(output)
@@ -169,52 +167,74 @@ def evaluate(entity_embedding, entity_vocab, entity_db, dataset_dir='.', dev_pro
     output_arr = np.vstack(output_arr)
     target_arr = np.vstack(target_arr)
 
-    correct = 0
-    for (n, (output, target)) in enumerate(zip(output_arr, target_arr)):
-        if target[np.argmax(output)] == 1:
-            correct += 1
+    p1_correct = 0.0
+    acc_correct = 0.0
+    bep_scores = []
+    f1_scores = []
+    binary_predictions = []
+    for n in range(output_arr.shape[0]):
+        if target_arr[n, np.argmax(output_arr[n])] == 1:
+            p1_correct += 1
+        bep_scores.append(_compute_bep(output_arr[n], target_arr[n])[0])
 
-    test_score = float(correct) / output_arr.shape[0]
-    logger.debug('P@1 (test): %.3f (%d/%d)', test_score, correct, output_arr.shape[0])
+        binary_pred = np.greater_equal(output_arr[n], thresholds).astype(np.float)
+        if np.array_equal(target_arr[n], binary_pred):
+            acc_correct += 1
 
-    if test_probs_file:
-        for ((fb_id, _, _, _), probs) in zip(dataset_obj['test'], output_arr):
-            probs_str = ' '.join([str(p) for p in probs])
-            test_probs_file.write('%s\t%s\n' % (fb_id.encode('utf-8'), probs_str))
+        binary_predictions.append(binary_pred)
+        f1_scores.append(f1_score(target_arr[n], binary_pred))
 
-    logger.info('P@1 (dev): %.3f', max(p1_scores))
-    logger.info('P@1 (test): %.3f', test_score)
+    binary_predictions = np.vstack(binary_predictions)
 
-    return (max(p1_scores), test_score)
+    test_p1_score = p1_correct / output_arr.shape[0]
+
+    click.echo('Best P@1 (dev): %.3f' % max(dev_p1_scores))
+
+    click.echo('P@1: %.3f' % test_p1_score)
+    click.echo('BEP: %.3f' % np.mean(bep_scores))
+    click.echo('Accuracy: %.3f' % (acc_correct / output_arr.shape[0]))
+    click.echo('Macro F1: %.3f' % np.mean(f1_scores))
+    click.echo('Micro F1: %.3f' % f1_score(target_arr.flatten(), binary_predictions.flatten()))
+
+    return (max(dev_p1_scores), test_p1_score)
 
 
-@memory.cache
 def _read_dataset(dataset_dir):
-    name_mapping = {'train': 'Etrain', 'dev': 'Edev', 'test': 'Etest'}
-
-    fb_wiki_mapping = {}
-    with open(os.path.join(dataset_dir, 'fb_wiki_mapping.tsv')) as mapping_file:
-        for line in mapping_file:
-            (fb_id, wiki_title) = line.rstrip().decode('utf-8').split('\t')
-            fb_wiki_mapping[fb_id] = wiki_title
+    name_mapping = {'train': 'train.tsv', 'dev': 'dev.tsv', 'test': 'test.tsv'}
 
     data = defaultdict(list)
 
     for dataset_type in name_mapping.keys():
         with open(os.path.join(dataset_dir, name_mapping[dataset_type])) as f:
-            for line in f:
-                obj = [s.strip() for s in line.rstrip().decode('utf-8').split()]
-                fb_id = obj[0]
-                title = fb_wiki_mapping.get(fb_id)
-                labels = []
-                count = None
-                if dataset_type == 'test':
-                    count = int(obj.pop())
+            for (n, line) in enumerate(f):
+                if n == 0:
+                    continue
+                (fb_id, title, labels) = line.rstrip().decode('utf-8').split('\t')
+                labels = labels.split(',')
 
-                for s in obj[1:]:
-                    if s.startswith('-'):
-                        labels.append(s.rstrip()[1:])
-
-                data[dataset_type].append((fb_id, title, labels, count))
+                data[dataset_type].append((fb_id, title, labels))
 
     return data
+
+
+# Based on https://github.com/yyaghoobzadeh/figment/blob/master/src/myutils.py#L536
+def _compute_bep(probs, labels):
+    arr = np.vstack([probs, labels]).T
+    arr = arr[arr[:, 0].argsort()[::-1]]
+
+    correct = 0.0
+    max_f1 = 0.0
+    thresh = 0.0
+    total = np.sum(arr[:, 1])
+
+    for n in range(arr.shape[0]):
+        if arr[n, 1] == 1.0:
+            correct += 1.0
+            prec = correct / (n + 1)
+            recall = correct / total
+            f1 = 2.0 * prec * recall / (prec + recall)
+            if f1 > max_f1:
+                max_f1 = f1
+                thresh = arr[n, 0]
+
+    return (max_f1, thresh)
