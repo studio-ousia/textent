@@ -94,11 +94,10 @@ def load_figment_embedding(in_file, mapping_file, out_file):
 
 
 @cli.command()
-@click.argument('word_file', type=click.File())
-@click.argument('entity_file', type=click.File())
+@click.argument('model_file', type=click.File())
 @click.argument('out_file', type=click.Path())
-def load_entity_vector(word_file, entity_file, out_file):
-    embedding = EmbeddingReader.load_entity_vector(word_file, entity_file)
+def load_wikipedia2vec(model_file, out_file):
+    embedding = EmbeddingReader.load_wikipedia2vec(model_file)
     embedding.save(out_file)
 
 
@@ -175,7 +174,7 @@ def train_model(description_db_file, entity_db_file, word_vocab_file, entity_voc
 @click.option('--batch-size', default=32)
 @click.option('--epoch', default=500)
 @click.option('--patience', default=5)
-@click.option('--hidden-units', default=200)
+@click.option('--num-hidden-units', default=200)
 @click.option('--exclude-oov', is_flag=True)
 @click.option('--temp-dir', type=click.Path(exists=True, file_okay=False), default='/dev/shm')
 @click.option('--seed', default=0)

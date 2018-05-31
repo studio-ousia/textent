@@ -10,8 +10,6 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from collections import defaultdict
-from marisa_trie import Trie
-from sklearn.metrics import f1_score
 from tempfile import NamedTemporaryFile
 from torch.autograd import Variable
 
@@ -21,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 class EntityTypeClassifier(nn.Module):
-    def __init__(self, entity_embedding, num_classes, hidden_units):
+    def __init__(self, entity_embedding, num_classes, num_hidden_units):
         super(EntityTypeClassifier, self).__init__()
 
         self._num_classes = num_classes
@@ -30,19 +28,18 @@ class EntityTypeClassifier(nn.Module):
         self._entity_embedding.weight = nn.Parameter(torch.FloatTensor(entity_embedding).cuda())
         self._entity_embedding.weight.requires_grad = False
 
-        self._hidden_layer = nn.Linear(entity_embedding.shape[1], hidden_units, bias=False)
-        self._output_layer = nn.Linear(hidden_units, num_classes, bias=False)
+        self._hidden_layer = nn.Linear(entity_embedding.shape[1], num_hidden_units, bias=False)
+        self._output_layer = nn.Linear(num_hidden_units, num_classes, bias=False)
 
     def forward(self, entity_indices):
         entity_emb = self._entity_embedding(entity_indices)
-
         hidden_vector = F.tanh(self._hidden_layer(entity_emb))
 
         return F.sigmoid(self._output_layer(hidden_vector))
 
 
 def evaluate(entity_embedding, entity_vocab, entity_db, dataset_dir, batch_size, epoch, patience,
-             hidden_units, exclude_oov, temp_dir, seed):
+             num_hidden_units, exclude_oov, temp_dir, seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
@@ -52,7 +49,7 @@ def evaluate(entity_embedding, entity_vocab, entity_db, dataset_dir, batch_size,
 
     target_entities = [title for fold in dataset_obj.keys() for (_, title, _) in dataset_obj[fold]
                        if title in entity_vocab]
-    target_entity_vocab = EntityVocab(Trie(target_entities), start_index=1)
+    target_entity_vocab = EntityVocab(target_entities, start_index=1)
 
     with open(os.path.join(dataset_dir, 'types.txt')) as types_file:
         target_labels = [l.rstrip().decode('utf-8') for l in types_file]
@@ -65,7 +62,7 @@ def evaluate(entity_embedding, entity_vocab, entity_db, dataset_dir, batch_size,
     for title in target_entity_vocab:
         target_emb[target_entity_vocab.get_index(title)] = entity_embedding[entity_vocab.get_index(title)]
 
-    type_classifier = EntityTypeClassifier(target_emb, len(target_labels), hidden_units)
+    type_classifier = EntityTypeClassifier(target_emb, len(target_labels), num_hidden_units)
     type_classifier = type_classifier.cuda()
 
     type_classifier.train()
@@ -87,12 +84,11 @@ def evaluate(entity_embedding, entity_vocab, entity_db, dataset_dir, batch_size,
                 index_batch.append(target_entity_vocab.get_index(title))
 
             target = np.zeros(len(target_labels), dtype=np.float)
-            for label in labels:
-                target[label_index[label]] = 1
+            target[[label_index[l] for l in labels]] = 1
             target_batch.append(target)
 
             if len(target_batch) == batch_size or n == len(dataset_obj[fold]) - 1:
-                yield (index_batch, target_batch)
+                yield (np.array(index_batch, dtype=np.int), np.vstack(target_batch))
 
                 index_batch = []
                 target_batch = []
@@ -124,10 +120,8 @@ def evaluate(entity_embedding, entity_vocab, entity_db, dataset_dir, batch_size,
                 dev_probs.append(output)
                 dev_targets.append(target)
 
-                for (n, ind) in enumerate(np.argmax(output, axis=1)):
-                    total += 1
-                    if target[n][ind] == 1:
-                        correct += 1
+                correct += np.sum(target[np.arange(target.shape[0]), np.argmax(output, axis=1)])
+                total += target.shape[0]
 
             dev_probs = np.vstack(dev_probs)
             dev_targets = np.vstack(dev_targets)
@@ -138,8 +132,7 @@ def evaluate(entity_embedding, entity_vocab, entity_db, dataset_dir, batch_size,
             logger.info('P@1 (dev): %.3f (%d/%d, Epoch: %d)', p1_score, correct, total, n_epoch)
 
             if p1_score > max(dev_p1_scores):
-                state_dict = type_classifier.state_dict()
-                torch.save(state_dict, f.name)
+                torch.save(type_classifier.state_dict(), f.name)
                 best_dev_data = (dev_probs, dev_targets)
 
             dev_p1_scores.append(p1_score)
@@ -162,7 +155,7 @@ def evaluate(entity_embedding, entity_vocab, entity_db, dataset_dir, batch_size,
         arg = Variable(torch.LongTensor(arg)).cuda()
         output = type_classifier(arg).cpu().data.numpy()
         output_arr.append(output)
-        target_arr.append(np.vstack(target))
+        target_arr.append(target)
 
     output_arr = np.vstack(output_arr)
     target_arr = np.vstack(target_arr)
@@ -182,7 +175,7 @@ def evaluate(entity_embedding, entity_vocab, entity_db, dataset_dir, batch_size,
             acc_correct += 1
 
         binary_predictions.append(binary_pred)
-        f1_scores.append(f1_score(target_arr[n], binary_pred))
+        f1_scores.append(_compute_f1(target_arr[n], binary_pred))
 
     binary_predictions = np.vstack(binary_predictions)
 
@@ -194,7 +187,7 @@ def evaluate(entity_embedding, entity_vocab, entity_db, dataset_dir, batch_size,
     click.echo('BEP: %.3f' % np.mean(bep_scores))
     click.echo('Accuracy: %.3f' % (acc_correct / output_arr.shape[0]))
     click.echo('Macro F1: %.3f' % np.mean(f1_scores))
-    click.echo('Micro F1: %.3f' % f1_score(target_arr.flatten(), binary_predictions.flatten()))
+    click.echo('Micro F1: %.3f' % _compute_f1(target_arr.flatten(), binary_predictions.flatten()))
 
     return (max(dev_p1_scores), test_p1_score)
 
@@ -215,6 +208,19 @@ def _read_dataset(dataset_dir):
                 data[dataset_type].append((fb_id, title, labels))
 
     return data
+
+
+def _compute_f1(labels, predictions):
+    correct = float(np.sum(np.logical_and(labels, predictions)))
+    if correct == 0:
+        return 0.0
+
+    total_pred = np.sum(predictions)
+    if total_pred == 0:
+        return 0.0
+    prec = correct / total_pred
+    recall = correct / np.sum(labels)
+    return 2.0 * prec * recall / (prec + recall)
 
 
 # Based on https://github.com/yyaghoobzadeh/figment/blob/master/src/myutils.py#L536

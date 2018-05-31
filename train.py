@@ -9,7 +9,6 @@ import torch
 import torch.optim as optim
 import torch.nn.functional as F
 
-import entity_typing
 from generator import generate_data
 from model import Encoder
 from utils.vocab import WordVocab, EntityVocab

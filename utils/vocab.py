@@ -12,7 +12,11 @@ logger = logging.getLogger(__name__)
 
 class Vocab(object):
     def __init__(self, dic, start_index=0):
-        self._dic = dic
+        if isinstance(dic, Trie):
+            self._dic = dic
+        else:
+            self._dic = Trie(dic)
+
         self._start_index = start_index
 
     @property
