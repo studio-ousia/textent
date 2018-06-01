@@ -79,7 +79,7 @@ def train(description_db, entity_db, word_vocab, entity_vocab, target_entity_voc
                      word_vocab=word_vocab.serialize(),
                      entity_vocab=entity_vocab.serialize(),
                      target_entity_vocab=target_entity_vocab.serialize()),
-                out_file + '.joblib')
+                out_file + '.pkl')
 
     if not save or 0 in save:
         state_dict = model.state_dict()
@@ -128,7 +128,7 @@ def train(description_db, entity_db, word_vocab, entity_vocab, target_entity_voc
 
 
 def load_model(model_file, model_cls=Encoder):
-    meta = joblib.load(re.sub(r'_epoch\d+$', '', model_file) + '.joblib')
+    meta = joblib.load(re.sub(r'_epoch\d+$', '', model_file) + '.pkl')
     model_params = meta['model_params']
 
     word_vocab = WordVocab.load(meta['word_vocab'])
