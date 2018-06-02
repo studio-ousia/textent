@@ -122,16 +122,18 @@ class EmbeddingReader(object):
         return EmbeddingReader(None, entity_embedding, None, entity_vocab)
 
     @staticmethod
-    def load_entity_vector(word_file, entity_file):
+    def load_wikipedia2vec(model_file):
         word_vectors = {}
-        for (n, line) in enumerate(word_file):
-            (word, values) = line.rstrip().decode('utf-8').split('\t')
-            word_vectors[word] = [float(v) for v in values.split()]
-
         entity_vectors = {}
-        for line in entity_file:
-            (title, values) = line.rstrip().decode('utf-8').split('\t')
-            entity_vectors[title] = [float(v) for v in values.split()]
+
+        for (n, line) in enumerate(model_file):
+            (item_str, vec_str) = line.rstrip().decode('utf-8').split('\t')
+            vector = [float(v) for v in vec_str.split(' ')]
+            if item_str.startswith('ENTITY/'):
+                title = item_str[7:].replace('_', ' ')
+                entity_vectors[title] = vector
+            else:
+                word_vectors[item_str] = vector
 
         word_vocab = WordVocab(Trie(word_vectors.keys()), True)
         word_embedding = np.zeros((len(word_vocab), len(word_vectors.values()[0])))
