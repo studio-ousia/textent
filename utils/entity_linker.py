@@ -3,7 +3,6 @@
 import hashlib
 import logging
 import os
-import shelve
 
 GCUBE_TOKEN = os.environ.get('GCUBE_TOKEN')
 
@@ -38,11 +37,9 @@ class Mention(object):
 
 
 class TagmeEntityLinker(object):
-    def __init__(self, entity_db, min_link_prob=0.00, min_disambi_score=0.02, cache_db='tagme_cache.db'):
+    def __init__(self, entity_db, min_link_prob, min_disambi_score, cache_dict={}):
         self._entity_db = entity_db
-        self._cache_db = cache_db
-        self._cache_reader = shelve.open(cache_db, protocol=-1, flag='r')
-        self._cache_writer = None
+        self._cache_dict = cache_dict
 
         self._min_link_prob = min_link_prob
         self._min_disambi_score = min_disambi_score
@@ -65,12 +62,10 @@ class TagmeEntityLinker(object):
 
     def detect_mentions(self, text, max_mention_len=100):
         cache_key = hashlib.md5(text.encode('utf-8')).hexdigest()
-        if cache_key in self._cache_reader:
-            responses = self._cache_reader[cache_key]
+        if cache_key in self._cache_dict:
+            responses = self._cache_dict[cache_key]
 
         else:
-            if self._cache_writer is None:
-                self._cache_writer = shelve.open(self._cache_db, protocol=-1, flag='c')
             try:
                 responses = self.get_tagme_results(text)
             except KeyboardInterrupt:
@@ -78,8 +73,6 @@ class TagmeEntityLinker(object):
             except:
                 logger.error('Unknown error: %s', text)
                 return []
-
-            self._cache_writer[cache_key] = responses
 
         ret = []
 

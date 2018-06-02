@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 
 import click
+import joblib
 import logging
 
 import train
@@ -197,9 +198,10 @@ def evaluate_entity_typing(model_file, entity_db_file, dataset_dir, embedding, *
 @click.argument('model_file', type=click.Path())
 @click.argument('entity_db_file', type=click.Path(exists=True))
 @click.option('-t', '--target-dataset', type=click.Choice(['20ng', 'r8']), default='20ng')
-@click.option('--dataset-path', type=click.Path(exists=True, file_okay=False), default='dataset/text-categorization')
+@click.option('--dataset-path', type=click.Path(exists=True, file_okay=False), default='dataset/text_classification')
 @click.option('--min-link-prob', default=0.00)
 @click.option('--min-disambi-score', default=0.05)
+@click.option('--tagme-cache', type=click.Path(), default=None)
 @click.option('--batch-size', default=32)
 @click.option('--epoch', default=100)
 @click.option('--patience', default=5)
@@ -210,11 +212,16 @@ def evaluate_entity_typing(model_file, entity_db_file, dataset_dir, embedding, *
 @click.option('--min-entity-count', default=5)
 @click.option('--max-text-len', default=1000)
 @click.option('--max-entity-len', default=500)
+@click.option('--temp-dir', type=click.Path(exists=True, file_okay=False), default='/dev/shm')
 @click.option('--seed', default=0)
 @click.option('--dropout-prob', default=0.5)
-def evaluate_text_classification(model_file, entity_db_file, min_link_prob, min_disambi_score, **kwargs):
+def evaluate_text_classification(model_file, entity_db_file, min_link_prob, min_disambi_score,
+                                 tagme_cache, **kwargs):
     entity_db = EntityDB.load(entity_db_file)
-    entity_linker = TagmeEntityLinker(entity_db, min_link_prob, min_disambi_score)
+    if tagme_cache:
+        tagme_cache = joblib.load(tagme_cache)
+
+    entity_linker = TagmeEntityLinker(entity_db, min_link_prob, min_disambi_score, tagme_cache)
 
     text_classification.evaluate(model_file, entity_linker, **kwargs)
 

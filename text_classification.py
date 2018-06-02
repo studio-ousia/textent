@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 
+import click
 import gensim
 import logging
 import os
@@ -12,7 +13,6 @@ import torch.nn.functional as F
 import torch.optim as optim
 from collections import defaultdict, Counter
 from marisa_trie import Trie
-from repoze.lru import lru_cache
 from sklearn.datasets import fetch_20newsgroups
 from sklearn.metrics import accuracy_score, f1_score, precision_recall_fscore_support
 from tempfile import NamedTemporaryFile
@@ -40,7 +40,9 @@ class TextClassifier(Encoder):
 
         self._out_layer = nn.Linear(self.dim_size, num_classes, bias=True)
 
-    def forward(self, (word_indices, entity_indices)):
+    def forward(self, arg):
+        (word_indices, entity_indices) = arg
+
         if self._dropout_prob != 0.0 and self.training:
             mask = word_indices.clone().float()
             mask.data.fill_(1.0 - self._dropout_prob)
@@ -60,15 +62,11 @@ class TextClassifier(Encoder):
 
 def evaluate(model_file, entity_linker, target_dataset, dataset_path, batch_size,
              epoch, patience, optimizer, learning_rate, dev_size, min_word_count,
-             min_entity_count, max_text_len, max_entity_len, seed, **model_kwargs):
+             min_entity_count, max_text_len, max_entity_len, seed, temp_dir, **model_kwargs):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.cuda.manual_seed(seed)
-
-    @lru_cache(100000)
-    def detect_mentions(text):
-        return entity_linker.detect_mentions(text)
 
     if target_dataset == '20ng':
         dataset = _read_20ng_dataset(dev_size)
@@ -92,10 +90,8 @@ def evaluate(model_file, entity_linker, target_dataset, dataset_path, batch_size
         if ind is not None:
             word_emb[word_vocab.get_index(word)] = model_word_emb[ind]
 
-    del model_word_emb
-
     entity_counter = Counter([m.title for f in ('train', 'dev', 'test')
-                              for (t, _, _) in dataset[f] for m in detect_mentions(t)])
+                              for (t, _, _) in dataset[f] for m in entity_linker.detect_mentions(t)])
     entity_vocab = EntityVocab(
         Trie([t for (t, c) in entity_counter.iteritems() if c >= min_entity_count]),
         start_index=1
@@ -109,12 +105,10 @@ def evaluate(model_file, entity_linker, target_dataset, dataset_path, batch_size
         if ind is not None:
             entity_emb[entity_vocab.get_index(entity)] = model_entity_emb[ind]
 
-    del model_entity_emb
-
     model.init(word_emb, entity_emb, len(dataset['target_names']), **model_kwargs)
     model = model.cuda()
 
-    def generate_batch(fold):
+    def generate_batches(fold):
         word_batch = []
         entity_batch = []
         labels = []
@@ -130,7 +124,7 @@ def evaluate(model_file, entity_linker, target_dataset, dataset_path, batch_size
             word_batch.append(word_indices)
 
             entity_indices = []
-            for mention in detect_mentions(text):
+            for mention in entity_linker.detect_mentions(text):
                 entity_index = entity_vocab.get_index(mention.title)
                 if entity_index is not None:
                     entity_indices.append(entity_index)
@@ -177,12 +171,12 @@ def evaluate(model_file, entity_linker, target_dataset, dataset_path, batch_size
 
     batch_idx = 0
 
-    with NamedTemporaryFile(dir='/dev/shm') as f:
+    with NamedTemporaryFile(dir=temp_dir) as f:
         for n_epoch in range(epoch):
             logger.info('Epoch: %d', n_epoch)
 
-            for (batch_idx, (args, target)) in enumerate(generate_batch('train'), batch_idx):
-                args = tuple([o.cuda(async=True) for o in args])
+            for (batch_idx, (args, target)) in enumerate(generate_batches('train'), batch_idx):
+                args = tuple([o.cuda() for o in args])
                 target = target.cuda()
 
                 optimizer_ins.zero_grad()
@@ -209,8 +203,8 @@ def evaluate(model_file, entity_linker, target_dataset, dataset_path, batch_size
 
             dev_correct = 0
             dev_total = 0
-            for (args, target) in generate_batch('dev'):
-                args = tuple([o.cuda(async=True) for o in args])
+            for (args, target) in generate_batches('dev'):
+                args = tuple([o.cuda() for o in args])
                 target = target.cuda()
 
                 output = model(args)
@@ -223,7 +217,8 @@ def evaluate(model_file, entity_linker, target_dataset, dataset_path, batch_size
 
             dev_scores.append(dev_score)
 
-            logger.info('dev score: %.4f (%d/%d) (max: %.4f)', dev_score, dev_correct, dev_total, max(dev_scores))
+            logger.info('dev score: %.4f (%d/%d) (max: %.4f)', dev_score, dev_correct, dev_total,
+                        max(dev_scores))
 
             model.train()
 
@@ -231,15 +226,14 @@ def evaluate(model_file, entity_linker, target_dataset, dataset_path, batch_size
                 if len(dev_scores) - dev_scores.index(max(dev_scores)) > patience:
                     break
 
-        state_dict = torch.load(f.name)
-        model.load_state_dict(state_dict)
+        model.load_state_dict(torch.load(f.name))
 
     model.eval()
 
     results = []
     targets = []
-    for (args, target) in generate_batch('test'):
-        args = tuple([o.cuda(async=True) for o in args])
+    for (args, target) in generate_batches('test'):
+        args = tuple([o.cuda() for o in args])
         target = target.cuda()
 
         output = model(args)
@@ -251,19 +245,18 @@ def evaluate(model_file, entity_linker, target_dataset, dataset_path, batch_size
 
     test_score = accuracy_score(targets, results)
 
-    print
-    print 'accuracy: %.4f' % test_score
-    print 'f-measure: %.4f' % f1_score(targets, results, average='macro')
+    click.echo('accuracy: %.4f' % test_score)
+    click.echo('f-measure: %.4f' % f1_score(targets, results, average='macro'))
 
-    print
-    print 'class-level results:'
+    click.echo('')
+    click.echo('class-level results:')
     prf_scores = precision_recall_fscore_support(
         targets, results, average=None, labels=range(len(dataset['target_names']))
     )
     for (i, name) in enumerate(dataset['target_names']):
-        print 'label: %s precision: %.4f recall: %.4f f-measure: %.4f' % (
+        click.echo('label: %s precision: %.4f recall: %.4f f-measure: %.4f' % (
             name, prf_scores[0][i], prf_scores[1][i], prf_scores[2][i]
-        )
+        ))
 
     return (max(dev_scores), test_score)
 
@@ -271,8 +264,7 @@ def evaluate(model_file, entity_linker, target_dataset, dataset_path, batch_size
 def _read_20ng_dataset(dev_size=0.1):
     tokenizer = RegexpTokenizer()
 
-    ret = dict(train=[], dev=[], test=[],
-               target_names=fetch_20newsgroups()['target_names'])
+    ret = dict(train=[], dev=[], test=[], target_names=fetch_20newsgroups()['target_names'])
 
     for fold in ('train', 'test'):
         dataset_obj = fetch_20newsgroups(subset=fold, shuffle=False)
