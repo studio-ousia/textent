@@ -113,7 +113,7 @@ def generate_word2vec_corpus(dump_file, entity_db_file, out_file, **kwargs):
     word2vec.generate_corpus(dump_file, entity_db, out_file, **kwargs)
 
 
-@cli.command(name='train')
+@cli.command()
 @click.argument('corpus_file', type=click.Path(exists=True))
 @click.argument('out_file', type=click.Path())
 @click.option('--mode', type=click.Choice(['sg', 'cbow']), default='sg')
